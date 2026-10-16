@@ -1,0 +1,101 @@
+
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-ticketcenter}
+      MYSQL_USER: ${DB_USERNAME:-ticketcenter}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+    volumes:
+      - db_data:/var/lib/mysql
+    # ports:
+    #   - "3307:3306"        # uncomment to reach the DB from the host
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./Ticket-Center-api
+      dockerfile: Dockerfile
+    image: tc-api:latest
+    ports:
+      - "8081:8000"
+    environment: &api-env
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: ${APP_KEY:?set APP_KEY in .env}
+      APP_URL: ${APP_URL:-http://localhost:8081}
+      DB_CONNECTION: mysql
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-ticketcenter}
+      DB_USERNAME: ${DB_USERNAME:-ticketcenter}
+      DB_PASSWORD: ${DB_PASSWORD}
+      QUEUE_CONNECTION: database
+      BROADCAST_CONNECTION: reverb
+      LOG_CHANNEL: stderr
+      # Reverb — API publishes events to the reverb container over the compose network
+      REVERB_APP_ID: ${REVERB_APP_ID:-ticketcenter}
+      REVERB_APP_KEY: ${REVERB_PUBLIC_APP_KEY:-ticketcenter-key}
+      REVERB_APP_SECRET: ${REVERB_APP_SECRET:?set REVERB_APP_SECRET in .env}
+      REVERB_HOST: reverb
+      REVERB_PORT: 8080
+      REVERB_SCHEME: http
+      RUN_MIGRATIONS: "true"          # only this service migrates
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  queue:
+    image: tc-api:latest
+    user: www-data
+    working_dir: /var/www
+    entrypoint: ["php", "artisan", "queue:work", "--tries=3", "--timeout=90"]
+    environment:
+      <<: *api-env
+      RUN_MIGRATIONS: "false"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  reverb:
+    image: tc-api:latest
+    user: www-data
+    working_dir: /var/www
+    entrypoint: ["php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080"]
+    ports:
+      - "8082:8080"                   # matches VITE_REVERB_PORT
+    environment:
+      <<: *api-env
+      RUN_MIGRATIONS: "false"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./Ticket-Center-web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8081/api}
+        REVERB_PUBLIC_APP_KEY: ${REVERB_PUBLIC_APP_KEY:-ticketcenter-key}
+        VITE_REVERB_HOST: ${VITE_REVERB_HOST:-localhost}
+        VITE_REVERB_PORT: ${VITE_REVERB_PORT:-8082}
+        VITE_REVERB_SCHEME: ${VITE_REVERB_SCHEME:-http}
+    image: tc:latest
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  db_data:
